@@ -1,7 +1,7 @@
 
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "abyssal-recoil-server",
+  "name": "abyssal-redo-server",
   "main": "src/index.js",
   "compatibility_date": "2026-11-10",
   "durable_objects": {
