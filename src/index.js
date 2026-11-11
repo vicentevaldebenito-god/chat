@@ -53,12 +53,30 @@ export class GameRoom extends DurableObject {
 
 export default {
   async fetch(request, env) {
-    const url = new URL(request.url);
+    const cors = {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type"
+    };
 
-    if (url.pathname === "/") {
-      return new Response("ABYSSAL REDO SERVER ONLINE");
+    // Permitir solicitudes CORS
+    if (request.method === "OPTIONS") {
+      return new Response(null, {
+        status: 204,
+        headers: cors
+      });
     }
 
+    const url = new URL(request.url);
+
+    // Comprobar servidor
+    if (url.pathname === "/") {
+      return new Response("ABYSSAL REDO SERVER ONLINE", {
+        headers: cors
+      });
+    }
+
+    // Crear sala
     if (url.pathname === "/create") {
       const code = crypto.randomUUID()
         .replaceAll("-", "")
@@ -69,20 +87,31 @@ export default {
 
       await room.fetch("https://room/init");
 
-      return Response.json({ code });
+      return Response.json(
+        { code },
+        { headers: cors }
+      );
     }
 
+    // Unirse a sala
     if (url.pathname.startsWith("/join/")) {
       const code = url.pathname.split("/").pop().toUpperCase();
 
       if (!/^[A-F0-9]{6}$/.test(code)) {
-        return new Response("Código inválido", { status: 400 });
+        return new Response("Código inválido", {
+          status: 400,
+          headers: cors
+        });
       }
 
       const room = env.ROOMS.getByName(code);
+
       return room.fetch(request);
     }
 
-    return new Response("Ruta no encontrada", { status: 404 });
+    return new Response("Ruta no encontrada", {
+      status: 404,
+      headers: cors
+    });
   }
 };
