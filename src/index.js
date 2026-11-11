@@ -1,48 +1,38 @@
 import { DurableObject } from "cloudflare:workers";
 
 export class GameRoom extends DurableObject {
-  constructor(ctx, env) {
-    super(ctx, env);
-    this.hostId = null;
-  }
-
   async fetch(request) {
     if (request.headers.get("Upgrade") !== "websocket") {
       return new Response("ABYSSAL REDO room ready");
     }
 
     const players = this.ctx.getWebSockets();
-    if (players.length >= 4) {
-      return new Response("Sala llena", { status: 403 });
-    }
+    if (players.length >= 4) return new Response("Sala llena", { status: 403 });
 
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
     const id = crypto.randomUUID();
-
-    if (!this.hostId) this.hostId = id;
-    const isHost = id === this.hostId;
+    let hostId = await this.ctx.storage.get("hostId");
+    if (!hostId || !players.length) {
+      hostId = id;
+      await this.ctx.storage.put("hostId", hostId);
+    }
+    const isHost = id === hostId;
 
     server.serializeAttachment({ id, isHost });
     this.ctx.acceptWebSocket(server);
 
     const currentPlayers = this.ctx.getWebSockets();
     server.send(JSON.stringify({
-      type: "welcome",
-      id,
-      hostId: this.hostId,
-      isHost,
-      players: currentPlayers.length,
-      maxPlayers: 4
+      type: "welcome", id, hostId, isHost,
+      players: currentPlayers.length, maxPlayers: 4
     }));
 
     for (const player of currentPlayers) {
       if (player === server) continue;
       try {
         player.send(JSON.stringify({
-          type: "player-joined",
-          id,
-          hostId: this.hostId,
+          type: "player-joined", id, hostId,
           players: currentPlayers.length
         }));
       } catch {}
@@ -51,8 +41,32 @@ export class GameRoom extends DurableObject {
     return new Response(null, { status: 101, webSocket: client });
   }
 
+  async closeRoomForHost(leavingId) {
+    const players = this.ctx.getWebSockets();
+    const notice = JSON.stringify({ type: "host-left", hostId: leavingId || null });
+    for (const player of players) {
+      try { player.send(notice); } catch {}
+      try { player.close(4001, "host-left"); } catch {}
+    }
+    await this.ctx.storage.delete("hostId");
+  }
+
   async webSocketMessage(socket, message) {
-    // Relay messages unchanged; the game validates message types and payloads.
+    let data;
+    try {
+      data = JSON.parse(typeof message === "string" ? message : await new Response(message).text());
+    } catch {}
+    const attachment = socket.deserializeAttachment() || {};
+
+    if (data && data.type === "room-leave") {
+      if (attachment.isHost || attachment.id === await this.ctx.storage.get("hostId")) {
+        await this.closeRoomForHost(attachment.id);
+      } else {
+        try { socket.close(1000, "left-room"); } catch {}
+      }
+      return;
+    }
+
     for (const player of this.ctx.getWebSockets()) {
       if (player === socket) continue;
       try { player.send(message); } catch {}
@@ -61,34 +75,31 @@ export class GameRoom extends DurableObject {
 
   async webSocketClose(socket) {
     const attachment = socket.deserializeAttachment() || {};
-    const leavingId = attachment.id;
-    const players = this.ctx.getWebSockets();
-
-    if (leavingId && leavingId === this.hostId) {
-      const notice = JSON.stringify({ type: "host-left", hostId: leavingId });
-      for (const player of players) {
-        try { player.send(notice); } catch {}
-        try { player.close(4001, "host-left"); } catch {}
-      }
-      this.hostId = null;
+    const hostId = await this.ctx.storage.get("hostId");
+    if (attachment.isHost || (attachment.id && attachment.id === hostId)) {
+      await this.closeRoomForHost(attachment.id);
       return;
     }
 
-    const count = players.length;
+    const players = this.ctx.getWebSockets();
     for (const player of players) {
       try {
         player.send(JSON.stringify({
-          type: "player-left",
-          id: leavingId || null,
-          hostId: this.hostId,
-          players: count
+          type: "player-left", id: attachment.id || null,
+          hostId, players: players.length
         }));
       } catch {}
     }
   }
 
   async webSocketError(socket) {
-    try { socket.close(1011, "socket-error"); } catch {}
+    const attachment = socket.deserializeAttachment() || {};
+    const hostId = await this.ctx.storage.get("hostId");
+    if (attachment.isHost || (attachment.id && attachment.id === hostId)) {
+      await this.closeRoomForHost(attachment.id);
+    } else {
+      try { socket.close(1011, "socket-error"); } catch {}
+    }
   }
 }
 
@@ -100,23 +111,18 @@ export default {
       "Access-Control-Allow-Headers": "Content-Type"
     };
 
-    if (request.method === "OPTIONS") {
-      return new Response(null, { status: 204, headers: cors });
-    }
+    if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: cors });
 
     const url = new URL(request.url);
-
     if (url.pathname === "/") {
       return new Response("ABYSSAL REDO SERVER ONLINE", { headers: cors });
     }
-
     if (url.pathname === "/create") {
       const code = crypto.randomUUID().replaceAll("-", "").slice(0, 6).toUpperCase();
       const room = env.ROOMS.getByName(code);
       await room.fetch("https://room/init");
       return Response.json({ code }, { headers: cors });
     }
-
     if (url.pathname.startsWith("/join/")) {
       const code = url.pathname.split("/").pop().toUpperCase();
       if (!/^[A-F0-9]{6}$/.test(code)) {
@@ -125,7 +131,6 @@ export default {
       const room = env.ROOMS.getByName(code);
       return room.fetch(request);
     }
-
     return new Response("Ruta no encontrada", { status: 404, headers: cors });
   }
 };
